@@ -1,146 +1,155 @@
 import streamlit as st
-import requests
-import re
+from huggingface_hub import InferenceClient
+import time
+import textwrap
+import os
 from datetime import datetime
 
-# Set page configuration
+# Set up page configuration
 st.set_page_config(
-    page_title="DeepSeek Chatbot",
-    page_icon="💬",
+    page_title="DeepSeek R1 Chat Assistant",
+    page_icon="💡",
     layout="centered",
     initial_sidebar_state="collapsed"
 )
 
-# Initialize session state
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-
-# System prompt template
-SYSTEM_PROMPT = """You are an AI assistant that helps solve complex problems. Always follow these steps:
-1. Thinking: Analyze the problem carefully and outline your thought process
-2. Answer: Provide a clear, structured solution to the problem
-3. Task: Suggest next steps or ask clarifying questions to continue the conversation
-
-Format your response exactly like this:
-Thinking: [your analytical process here]
-Answer: [your solution here]
-Task: [suggested next steps here]"""
-
-# Hugging Face API configuration
-API_URL = "https://api-inference.huggingface.co/models/deepseek-ai/deepseek-r1"
-
-def query_hf(payload, hf_token):
-    headers = {"Authorization": f"Bearer {hf_token}"}
-    response = requests.post(API_URL, headers=headers, json=payload)
-    return response.json()
-
-def parse_response(response):
-    # Use regex to extract sections
-    sections = {
-        'thinking': re.search(r'Thinking:\s*(.*?)(?=\nAnswer:|\nTask:|$)', response, re.DOTALL),
-        'answer': re.search(r'Answer:\s*(.*?)(?=\nTask:|$)', response, re.DOTALL),
-        'task': re.search(r'Task:\s*(.*)', response, re.DOTALL)
+# Custom CSS for styling
+st.markdown("""
+    <style>
+    .stChatInput {position: fixed; bottom: 3rem; width: 100%;}
+    .stDownloadButton {display: block; margin: 0 auto;}
+    .thinking-bubble {
+        background: #f0f2f6;
+        border-radius: 15px;
+        padding: 1rem;
+        margin: 0.5rem 0;
+        animation: fadeIn 0.5s;
     }
+    @keyframes fadeIn {
+        from { opacity: 0; }
+        to { opacity: 1; }
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+# Initialize session state
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "conversation_ended" not in st.session_state:
+    st.session_state.conversation_ended = False
+if "text_buffer" not in st.session_state:
+    st.session_state.text_buffer = ""
+
+# Initialize HF client
+@st.cache_resource
+def get_client():
+    return InferenceClient(token=st.secrets["HF_TOKEN"])
+
+client = get_client()
+
+# System prompt for structured thinking
+SYSTEM_PROMPT = """You are a helpful assistant that follows this structure:
+[THINKING]
+- Analyze user's query
+- Break down problem into components
+- Identify solution approach
+[/THINKING]
+
+[ANSWER]
+Provide final comprehensive answer here
+[/ANSWER]
+
+Always maintain this structure and keep conversations professional yet friendly."""
+
+def generate_conversation(user_input):
+    prompt = f"{SYSTEM_PROMPT}\n\nUser: {user_input}\nAssistant:"
     
-    parsed = {k: v.group(1).strip() if v else None for k, v in sections.items()}
-    return parsed
-
-def generate_chat_file():
-    """Generate text file content from chat history"""
-    file_content = "DeepSeek Chat History\n\n"
-    for msg in st.session_state.chat_history:
-        role = "User" if msg["role"] == "user" else "Assistant"
-        content = msg["content"].replace("Thinking:", "").replace("Answer:", "").replace("Task:", "")
-        file_content += f"{role}: {content}\n\n"
-    return file_content
-
-# Sidebar for settings and export
-with st.sidebar:
-    st.header("Settings")
-    hf_token = st.text_input(
-        "Hugging Face Token",
-        type="password",
-        value=st.secrets.get("HF_TOKEN", "")  # Get from secrets if available
+    response = client.text_generation(
+        prompt=prompt,
+        model="deepseek-ai/DeepSeek-R1",
+        max_new_tokens=1024,
+        temperature=0.7,
+        do_sample=True,
+        return_full_text=False
     )
     
-    if st.button("📥 Export Conversation", use_container_width=True):
-        if not st.session_state.chat_history:
-            st.warning("No conversation to export")
-        else:
-            chat_file = generate_chat_file()
-            st.download_button(
-                label="Download Chat History",
-                data=chat_file,
-                file_name=f"deepseek_chat_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
-                mime="text/plain",
-                use_container_width=True
-            )
+    return response.strip()
 
-# Main chat interface
-st.title("🧠 DeepSeek Cognitive Assistant")
-st.caption("A structured problem-solving assistant with transparent reasoning")
-
-# Display chat history
-for message in st.session_state.chat_history:
-    with st.chat_message(message["role"]):
-        if message["role"] == "assistant":
-            parsed = parse_response(message["content"])
-            
-            # Display thinking process
-            if parsed['thinking']:
-                with st.status("💭 Thinking Process", expanded=False):
-                    st.write(parsed['thinking'])
-            
-            # Display answer
-            if parsed['answer']:
-                st.markdown("#### 📝 Solution")
-                st.write(parsed['answer'])
-            
-            # Display next steps
-            if parsed['task']:
-                st.divider()
-                st.markdown("#### 🔜 Next Steps")
-                st.write(parsed['task'])
-        else:
-            st.write(message["content"])
-
-# User input handling
-if prompt := st.chat_input("Enter your problem or question..."):
-    if not hf_token:
-        st.warning("🔑 Please add your Hugging Face token in the sidebar")
-        st.stop()
-
-    # Add user message to history
-    st.session_state.chat_history.append({"role": "user", "content": prompt})
+def format_response(response):
+    # Split into thinking and answer sections
+    thinking = ""
+    answer = ""
     
-    # Construct conversation prompt
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        *[{"role": msg["role"], "content": msg["content"]} 
-          for msg in st.session_state.chat_history]
-    ]
+    if "[THINKING]" in response and "[/THINKING]" in response:
+        thinking = response.split("[THINKING]")[1].split("[/THINKING]")[0].strip()
+        answer = response.split("[/THINKING]")[1].split("[ANSWER]")[1].split("[/ANSWER]")[0].strip()
+    else:
+        answer = response
     
-    try:
-        with st.spinner("🤖 Processing..."):
-            response = query_hf({"inputs": messages}, hf_token)
-            
-            if isinstance(response, dict) and 'error' in response:
-                st.error(f"API Error: {response['error']}")
-                st.session_state.chat_history.pop()
-            else:
-                # Handle different response formats
-                if isinstance(response, list):
-                    full_response = response[0].get('generated_text', '')
-                else:
-                    full_response = response.get('generated_text', '')
+    return thinking, answer
+
+# Chat interface
+st.title("DeepSeek R1 Assistant")
+st.caption("An AI assistant that shows its thinking process")
+
+# Display chat messages
+chat_container = st.container()
+with chat_container:
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+# Chat input
+if not st.session_state.conversation_ended:
+    if prompt := st.chat_input("Type your message..."):
+        # Add user message
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        st.session_state.text_buffer += f"User: {prompt}\n\n"
+        
+        # Generate response
+        with st.spinner("Analyzing..."):
+            raw_response = generate_conversation(prompt)
+            thinking, answer = format_response(raw_response)
+        
+        # Display thinking process
+        with chat_container:
+            with st.chat_message("assistant"):
+                thinking_placeholder = st.empty()
+                if thinking:
+                    wrapped_thinking = textwrap.fill(thinking, width=80)
+                    thinking_placeholder.markdown(f"<div class='thinking-bubble'>💭 **Thinking Process**\n\n{wrapped_thinking}</div>", 
+                                                 unsafe_allow_html=True)
+                    st.session_state.text_buffer += f"Assistant Thinking:\n{thinking}\n\n"
+                    time.sleep(2)  # Simulate processing time
                 
-                # Add assistant response to history
-                st.session_state.chat_history.append({
-                    "role": "assistant",
-                    "content": full_response
-                })
-                st.rerun()
+                # Display final answer
+                answer_placeholder = st.empty()
+                wrapped_answer = textwrap.fill(answer, width=80)
+                answer_placeholder.markdown(wrapped_answer)
+                st.session_state.text_buffer += f"Assistant Answer:\n{answer}\n\n"
                 
-    except Exception as e:
-        st.error(f"Connection Error: {str(e)}")
-        st.session_state.chat_history.pop()
+        # Add assistant message to history
+        st.session_state.messages.append({"role": "assistant", "content": answer})
+
+# Download functionality
+if st.session_state.messages and not st.session_state.conversation_ended:
+    if st.button("End Conversation"):
+        st.session_state.conversation_ended = True
+        st.rerun()
+
+if st.session_state.conversation_ended:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"conversation_{timestamp}.txt"
+    
+    st.download_button(
+        label="Download Conversation",
+        data=st.session_state.text_buffer,
+        file_name=filename,
+        mime="text/plain"
+    )
+    
+    if st.button("Start New Conversation"):
+        st.session_state.messages = []
+        st.session_state.conversation_ended = False
+        st.session_state.text_buffer = ""
+        st.rerun()
