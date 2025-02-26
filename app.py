@@ -1,15 +1,17 @@
 import streamlit as st
 import requests
+import re
 from datetime import datetime
 
 # Set page configuration
 st.set_page_config(
     page_title="DeepSeek Chatbot",
     page_icon="💬",
-    layout="centered"
+    layout="centered",
+    initial_sidebar_state="collapsed"
 )
 
-# Initialize session state for chat history
+# Initialize session state
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
@@ -32,59 +34,82 @@ def query_hf(payload, hf_token):
     response = requests.post(API_URL, headers=headers, json=payload)
     return response.json()
 
+def parse_response(response):
+    # Use regex to extract sections
+    sections = {
+        'thinking': re.search(r'Thinking:\s*(.*?)(?=\nAnswer:|\nTask:|$)', response, re.DOTALL),
+        'answer': re.search(r'Answer:\s*(.*?)(?=\nTask:|$)', response, re.DOTALL),
+        'task': re.search(r'Task:\s*(.*)', response, re.DOTALL)
+    }
+    
+    parsed = {k: v.group(1).strip() if v else None for k, v in sections.items()}
+    return parsed
+
 def generate_chat_file():
     """Generate text file content from chat history"""
-    file_content = "Chat History\n\n"
+    file_content = "DeepSeek Chat History\n\n"
     for msg in st.session_state.chat_history:
         role = "User" if msg["role"] == "user" else "Assistant"
-        file_content += f"{role}: {msg['content']}\n\n"
+        content = msg["content"].replace("Thinking:", "").replace("Answer:", "").replace("Task:", "")
+        file_content += f"{role}: {content}\n\n"
     return file_content
 
-# Sidebar configuration
+# Sidebar for settings and export
 with st.sidebar:
-    st.header("Configuration")
-    hf_token = st.text_input("Hugging Face Token", type="password")
+    st.header("Settings")
+    hf_token = st.text_input(
+        "Hugging Face Token",
+        type="password",
+        value=st.secrets.get("HF_TOKEN", "")  # Get from secrets if available
+    )
     
-    if st.button("Export Conversation"):
-        if len(st.session_state.chat_history) == 0:
+    if st.button("📥 Export Conversation", use_container_width=True):
+        if not st.session_state.chat_history:
             st.warning("No conversation to export")
         else:
             chat_file = generate_chat_file()
             st.download_button(
-                label="Download Chat",
+                label="Download Chat History",
                 data=chat_file,
-                file_name=f"chat_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
-                mime="text/plain"
+                file_name=f"deepseek_chat_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                mime="text/plain",
+                use_container_width=True
             )
 
 # Main chat interface
-st.title("DeepSeek Cognitive Assistant")
-st.caption("A structured problem-solving chatbot with transparent reasoning")
+st.title("🧠 DeepSeek Cognitive Assistant")
+st.caption("A structured problem-solving assistant with transparent reasoning")
 
 # Display chat history
 for message in st.session_state.chat_history:
     with st.chat_message(message["role"]):
-        content = message["content"]
-        if message["role"] == "assistant" and "Thinking:" in content:
-            parts = content.split("Answer:", 1)
-            if len(parts) == 2:
-                st.markdown(f"**Thinking Process**\n{parts[0].replace('Thinking:', '').strip()}")
+        if message["role"] == "assistant":
+            parsed = parse_response(message["content"])
+            
+            # Display thinking process
+            if parsed['thinking']:
+                with st.status("💭 Thinking Process", expanded=False):
+                    st.write(parsed['thinking'])
+            
+            # Display answer
+            if parsed['answer']:
+                st.markdown("#### 📝 Solution")
+                st.write(parsed['answer'])
+            
+            # Display next steps
+            if parsed['task']:
                 st.divider()
-                st.markdown(f"**Solution**\n{parts[1].split('Task:')[0].strip()}")
-                if "Task:" in content:
-                    st.divider()
-                    st.markdown(f"**Next Steps**\n{content.split('Task:')[1].strip()}")
-            else:
-                st.write(content)
+                st.markdown("#### 🔜 Next Steps")
+                st.write(parsed['task'])
         else:
-            st.write(content)
+            st.write(message["content"])
 
 # User input handling
 if prompt := st.chat_input("Enter your problem or question..."):
     if not hf_token:
-        st.warning("Please add your Hugging Face token in the sidebar")
+        st.warning("🔑 Please add your Hugging Face token in the sidebar")
         st.stop()
-    
+
     # Add user message to history
     st.session_state.chat_history.append({"role": "user", "content": prompt})
     
@@ -96,18 +121,26 @@ if prompt := st.chat_input("Enter your problem or question..."):
     ]
     
     try:
-        # Get AI response
-        response = query_hf({"inputs": messages}, hf_token)
-        
-        if isinstance(response, list) and 'generated_text' in response[0]:
-            full_response = response[0]['generated_text']
-        else:
-            full_response = "Error: Unable to generate response. Please try again."
-        
-        # Add assistant response to history
-        st.session_state.chat_history.append({"role": "assistant", "content": full_response})
-        st.rerun()
-    
+        with st.spinner("🤖 Processing..."):
+            response = query_hf({"inputs": messages}, hf_token)
+            
+            if isinstance(response, dict) and 'error' in response:
+                st.error(f"API Error: {response['error']}")
+                st.session_state.chat_history.pop()
+            else:
+                # Handle different response formats
+                if isinstance(response, list):
+                    full_response = response[0].get('generated_text', '')
+                else:
+                    full_response = response.get('generated_text', '')
+                
+                # Add assistant response to history
+                st.session_state.chat_history.append({
+                    "role": "assistant",
+                    "content": full_response
+                })
+                st.rerun()
+                
     except Exception as e:
-        st.error(f"API Error: {str(e)}")
-        st.session_state.chat_history.pop()  # Remove last user message if failed
+        st.error(f"Connection Error: {str(e)}")
+        st.session_state.chat_history.pop()
