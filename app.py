@@ -1,155 +1,121 @@
 import streamlit as st
 from huggingface_hub import InferenceClient
-import time
-import textwrap
-import os
 from datetime import datetime
+import re
 
 # Set up page configuration
-st.set_page_config(
-    page_title="DeepSeek R1 Chat Assistant",
-    page_icon="💡",
-    layout="centered",
-    initial_sidebar_state="collapsed"
-)
+st.set_page_config(page_title="AI Chatbot", page_icon="🤖")
 
-# Custom CSS for styling
-st.markdown("""
-    <style>
-    .stChatInput {position: fixed; bottom: 3rem; width: 100%;}
-    .stDownloadButton {display: block; margin: 0 auto;}
-    .thinking-bubble {
-        background: #f0f2f6;
-        border-radius: 15px;
-        padding: 1rem;
-        margin: 0.5rem 0;
-        animation: fadeIn 0.5s;
-    }
-    @keyframes fadeIn {
-        from { opacity: 0; }
-        to { opacity: 1; }
-    }
-    </style>
-    """, unsafe_allow_html=True)
+# Initialize Hugging Face client
+if "HF_TOKEN" not in st.secrets:
+    st.error("Hugging Face API token not found in Streamlit secrets.")
+    st.stop()
+
+client = InferenceClient(token=st.secrets["HF_TOKEN"])
 
 # Initialize session state
 if "messages" not in st.session_state:
     st.session_state.messages = []
-if "conversation_ended" not in st.session_state:
-    st.session_state.conversation_ended = False
-if "text_buffer" not in st.session_state:
-    st.session_state.text_buffer = ""
 
-# Initialize HF client
-@st.cache_resource
-def get_client():
-    return InferenceClient(token=st.secrets["HF_TOKEN"])
-
-client = get_client()
-
-# System prompt for structured thinking
-SYSTEM_PROMPT = """You are a helpful assistant that follows this structure:
-[THINKING]
-- Analyze user's query
-- Break down problem into components
-- Identify solution approach
-[/THINKING]
-
-[ANSWER]
-Provide final comprehensive answer here
-[/ANSWER]
-
-Always maintain this structure and keep conversations professional yet friendly."""
-
-def generate_conversation(user_input):
-    prompt = f"{SYSTEM_PROMPT}\n\nUser: {user_input}\nAssistant:"
+# Define helper functions
+def parse_response(response):
+    """Parse the model response into structured sections"""
+    sections = {
+        "Thinking Role": None,
+        "Problem Definition": None,
+        "Task Execution": None,
+        "Final Answer": None
+    }
     
-    response = client.text_generation(
-        prompt=prompt,
-        model="deepseek-ai/DeepSeek-R1",
-        max_new_tokens=1024,
-        temperature=0.7,
-        do_sample=True,
-        return_full_text=False
-    )
+    # Use regex to extract each section
+    for section in sections:
+        match = re.search(fr"{section}:\s*(.*?)(?=\n\w+:|$)", response, re.DOTALL)
+        if match:
+            sections[section] = match.group(1).strip()
     
-    return response.strip()
+    return sections
 
-def format_response(response):
-    # Split into thinking and answer sections
-    thinking = ""
-    answer = ""
-    
-    if "[THINKING]" in response and "[/THINKING]" in response:
-        thinking = response.split("[THINKING]")[1].split("[/THINKING]")[0].strip()
-        answer = response.split("[/THINKING]")[1].split("[ANSWER]")[1].split("[/ANSWER]")[0].strip()
-    else:
-        answer = response
-    
-    return thinking, answer
-
-# Chat interface
-st.title("DeepSeek R1 Assistant")
-st.caption("An AI assistant that shows its thinking process")
+def generate_transcript():
+    """Generate chat transcript text"""
+    transcript = []
+    for msg in st.session_state.messages:
+        if msg["role"] == "user":
+            transcript.append(f"User: {msg['content']}")
+        elif msg["role"] == "assistant":
+            transcript.append(f"Assistant:\n{msg['content']}")
+    return "\n\n".join(transcript)
 
 # Display chat messages
-chat_container = st.container()
-with chat_container:
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
+for message in st.session_state.messages:
+    if message["role"] == "user":
+        with st.chat_message("user"):
             st.markdown(message["content"])
+    elif message["role"] == "assistant":
+        with st.chat_message("assistant"):
+            sections = parse_response(message["content"])
+            if sections["Thinking Role"]:
+                st.markdown(f"🧠 Thinking Role:** {sections['Thinking Role']}")
+            if sections["Problem Definition"]:
+                st.markdown(f"🔍 Problem Definition:** {sections['Problem Definition']}")
+            if sections["Task Execution"]:
+                st.markdown(f"⚙ Task Execution:** {sections['Task Execution']}")
+            if sections["Final Answer"]:
+                st.markdown(f"📝 Final Answer:** {sections['Final Answer']}")
 
-# Chat input
-if not st.session_state.conversation_ended:
-    if prompt := st.chat_input("Type your message..."):
-        # Add user message
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        st.session_state.text_buffer += f"User: {prompt}\n\n"
-        
-        # Generate response
-        with st.spinner("Analyzing..."):
-            raw_response = generate_conversation(prompt)
-            thinking, answer = format_response(raw_response)
-        
-        # Display thinking process
-        with chat_container:
-            with st.chat_message("assistant"):
-                thinking_placeholder = st.empty()
-                if thinking:
-                    wrapped_thinking = textwrap.fill(thinking, width=80)
-                    thinking_placeholder.markdown(f"<div class='thinking-bubble'>💭 **Thinking Process**\n\n{wrapped_thinking}</div>", 
-                                                 unsafe_allow_html=True)
-                    st.session_state.text_buffer += f"Assistant Thinking:\n{thinking}\n\n"
-                    time.sleep(2)  # Simulate processing time
-                
-                # Display final answer
-                answer_placeholder = st.empty()
-                wrapped_answer = textwrap.fill(answer, width=80)
-                answer_placeholder.markdown(wrapped_answer)
-                st.session_state.text_buffer += f"Assistant Answer:\n{answer}\n\n"
-                
-        # Add assistant message to history
-        st.session_state.messages.append({"role": "assistant", "content": answer})
+# Chat input form
+with st.form("chat_input", clear_on_submit=True):
+    model_name = st.text_input("Model Name", value="DeepSeek-R1")
+    user_input = st.text_area("Your Message", height=100)
+    submitted = st.form_submit_button("Send")
 
-# Download functionality
-if st.session_state.messages and not st.session_state.conversation_ended:
-    if st.button("End Conversation"):
-        st.session_state.conversation_ended = True
-        st.rerun()
-
-if st.session_state.conversation_ended:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"conversation_{timestamp}.txt"
+if submitted and user_input.strip():
+    # Add user message to history
+    st.session_state.messages.append({"role": "user", "content": user_input})
     
-    st.download_button(
-        label="Download Conversation",
-        data=st.session_state.text_buffer,
-        file_name=filename,
-        mime="text/plain"
-    )
+    # Generate prompt with conversation history
+    prompt = f"""You are a helpful assistant. Always format responses with:
+- Thinking Role: [Your assumed role]
+- Problem Definition: [Clear problem statement]
+- Task Execution: [Step-by-step processing]
+- Final Answer: [Concise solution]
+
+Conversation History:
+"""
+    for msg in st.session_state.messages[-4:]:  # Keep recent history
+        if msg["role"] == "user":
+            prompt += f"\nUser: {msg['content']}"
+        elif msg["role"] == "assistant":
+            prompt += f"\nAssistant: {msg['content']}"
     
-    if st.button("Start New Conversation"):
-        st.session_state.messages = []
-        st.session_state.conversation_ended = False
-        st.session_state.text_buffer = ""
-        st.rerun()
+    prompt += f"\n\nUser: {user_input}\nAssistant:"
+    
+    # Generate response
+    try:
+        response = client.text_generation(
+            model=model_name,
+            prompt=prompt,
+            max_new_tokens=500,
+            temperature=0.7,
+            do_sample=True
+        )
+    except Exception as e:
+        st.error(f"API Error: {str(e)}")
+        st.stop()
+    
+    # Add assistant response to history
+    st.session_state.messages.append({"role": "assistant", "content": response.strip()})
+    st.rerun()
+
+# Download transcript
+if st.session_state.messages:
+    st.divider()
+    with st.expander("📥 Download Chat Transcript"):
+        if st.checkbox("Generate transcript (approved)"):
+            transcript = generate_transcript()
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            st.download_button(
+                label="Download Transcript",
+                data=transcript,
+                file_name=f"chat_transcript_{timestamp}.txt",
+                mime="text/plain"
+            )
